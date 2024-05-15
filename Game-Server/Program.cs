@@ -59,7 +59,8 @@ namespace Game_Server
                 this.Send(CreateTheData(new Message
                 {
                     Name = this.Name,
-                    RequestType = "UNREGIST_RESPONSE"
+                    RequestType = "UNREGIST_RESPONSE",
+                    Text = "CONNECTED"
                 }));
                 return;
             }
@@ -70,7 +71,8 @@ namespace Game_Server
                 this.Send(CreateTheData(new Message
                 {
                     Name = this.Name,
-                    RequestType = "SEARCH_RESPONSE"
+                    RequestType = "SEARCH_RESPONSE",
+                    Text = "CONNECTED"
                 }));
                 EnqueueMessage(message);
                 return;
@@ -125,6 +127,8 @@ namespace Game_Server
 
     public class MainServer
     {
+        // 유저 정보 임시 저장 버퍼 -> 수정 필요
+        private Dictionary<string, string> _userNameBuffer;
         private List<ServerSocketHandler> _serverSocketHandlers;
         private List<User> _users;
         private Queue<Message> _messages;
@@ -147,9 +151,10 @@ namespace Game_Server
 
             foreach (var user in _users)
             {
-                _logger.Log(Logger.LogLevel.Info, user.Password);
+                _logger.Log(Logger.LogLevel.Info, user.PhoneNumber);
             }
 
+            _userNameBuffer = new Dictionary<string, string>();
             _serverSocketHandlers = new List<ServerSocketHandler>();
             _messages = new Queue<Message>();
             _port = 8080;
@@ -210,7 +215,7 @@ namespace Game_Server
                     Thread.Sleep(100);
                     continue;
                 }
-
+                
                 Message message = DequeueFromMessages();
 
                 _logger.Log(Logger.LogLevel.Info, message.RequestType);
@@ -274,19 +279,19 @@ namespace Game_Server
                 if (message.RequestType.Equals("REGIST_USER_ID/PW"))
                 {
                     bool registResult = false;
+                    string[] textArr = SplitTextInMessage(message.Text);
+                    User insertToUser = new User
+                    {
+                        ID = textArr[0],
+                        Name = textArr[1],
+                        Password = textArr[2],
+                        PhoneNumber = textArr[3]
+                    };
 
                     foreach (var user in _users)
                     {
-                        if (handlerToParse.Name.Equals(user.ID)) continue;
-                        string[] textArr = SplitTextInMessage(message.Text);
-
-                        _dbHandler.Insert(new User
-                        {
-                            ID = textArr[0],
-                            Name = textArr[1],
-                            Password = textArr[2],
-                            PhoneNumber = textArr[3]
-                        });
+                        if (insertToUser.ID.Equals(user.ID)) continue;
+                        _dbHandler.Insert(insertToUser);
 
                         _logger.Log(Logger.LogLevel.Info, message.Name + " 회원 정보가 DB에 등록 되었습니다.");
                         registResult = true;
@@ -294,11 +299,11 @@ namespace Game_Server
                         break;
                     }
 
-                    _logger.Log(Logger.LogLevel.Info, "결과: " + registResult);
                     if (!registResult)
                     {
                         handlerToParse.Send(handlerToParse.CreateTheData(new Message
                         {
+                            Name = handlerToParse.Name,
                             RequestType = "REGIST_RESPONSE",
                             Text = "REFUSED"
                         }));
@@ -310,10 +315,183 @@ namespace Game_Server
                     {
                         handlerToParse.Send(handlerToParse.CreateTheData(new Message
                         {
+                            Name = handlerToParse.Name,
                             RequestType = "REGIST_RESPONSE",
                             Text = "COMPLETED"
                         }));
+
                         _users = _dbHandler.SearchAll();
+                    }
+                }
+
+                if (message.RequestType.Equals("UNREGIST_USER_ID/PW"))
+                {
+                    bool unregistResult = false;
+                    string[] textArr = SplitTextInMessage(message.Text);
+                    User deleteToUser = new User
+                    {
+                        ID = textArr[0],
+                        Password = textArr[1]
+                    };
+
+                    foreach (var user in _users)
+                    {
+                        if (!deleteToUser.ID.Equals(user.ID)) continue;
+
+                        if (!deleteToUser.Password.Equals(user.Password)) break;
+
+                        _dbHandler.Delete(deleteToUser);
+                        _logger.Log(Logger.LogLevel.Info, message.Name + " 회원 정보가 DB에서 제거 되었습니다.");
+
+                        unregistResult = true;
+                        break;
+                    }
+
+                    if (!unregistResult) {
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            RequestType = "UNREGIST_RESPONSE",
+                            Text = "REFUSED"
+                        }));
+
+                        continue;
+                    }
+
+                    if (unregistResult)
+                    {
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            RequestType = "UNREGIST_RESPONSE",
+                            Text = "COMPLETED"
+                        }));
+
+                        _users = _dbHandler.SearchAll();
+                    }
+                }
+
+                if (message.RequestType.Equals("SEARCH_USER_ID"))
+                {
+                    bool searchResult = false;
+                    User searchToUser = new User
+                    {
+                        PhoneNumber = message.Text
+                    };
+
+                    foreach (var user in _users)
+                    {
+                        if (!searchToUser.PhoneNumber.Equals(user.PhoneNumber)) continue;
+                        searchResult = true;    
+
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            Destination = "ID_FORM",
+                            RequestType = "SEARCH_RESPONSE",
+                            Text = user.ID
+                        }));
+                    }
+
+                    if (!searchResult) {
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            RequestType = "SEARCH_RESPONSE",
+                            Text = "REFUSED"
+                        }));
+                    }
+                }
+
+                if (message.RequestType.Equals("SEARCH_USER_PW"))
+                {
+                    bool searchResult = false;
+                    User searchToUser = new User
+                    {
+                        ID = message.Text
+                    };
+
+                    foreach (var user in _users)
+                    {
+                        if (searchToUser.ID.Equals(user.ID))
+                        {
+                            _userNameBuffer.Add(handlerToParse.Name, user.ID);
+                            searchResult = true;
+                            break;
+                        }
+                    }
+
+                    if (!searchResult)
+                    {
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            RequestType = "SEARCH_RESPONSE",
+                            Text = "REFUSED"
+                        }));
+                        continue;
+                    }
+
+                    if (searchResult)
+                    {
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            Destination = "PASSWORD_FORM",
+                            RequestType = "SEARCH_RESPONSE",
+                            Text = "ACCEPTED"
+                        }));
+                        continue;
+                    }
+                }
+
+                if (message.RequestType.Equals("RENEW_USER_PASSOWRD"))
+                {
+                    string userId = _userNameBuffer[message.Name];
+                    bool updateResult = false;
+
+                    foreach (var user in _users)
+                    {
+                        if (userId.Equals(user.ID))
+                        {
+                            User updateToUser = new User
+                            {
+                                ID = user.ID,
+                                Password = message.Text,
+                                Name = user.Name,
+                                PhoneNumber = user.PhoneNumber
+                            };
+
+                            _dbHandler.Update(updateToUser);
+                            _userNameBuffer.Remove(message.Name);
+                            _users = _dbHandler.SearchAll();
+                            updateResult = true;
+                            _logger.Log(Logger.LogLevel.Info, message.Name + " 의 비밀번호 변경이 완료 되었습니다.");
+                            break;
+                        }
+                    }
+
+                    if (!updateResult)
+                    {
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            RequestType = "RENEW_RESPONSE",
+                            Text = "REFUSED"
+                        }));
+                        continue;
+                    }
+
+                    if (updateResult)
+                    {
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            RequestType = "RENEW_RESPONSE",
+                            Text = "COMPLETED"
+                        }));
+
+                        continue;
                     }
                 }
             }
