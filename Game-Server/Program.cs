@@ -15,6 +15,8 @@ using System.Timers;
 using static System.Net.Mime.MediaTypeNames;
 using System.Xml.Linq;
 using Net_Framework_4._7._2_Model;
+using Server_Repository;
+using Message = Net_Framework_4._7._2_Model.Message;
 
 namespace Game_Server
 {
@@ -125,9 +127,25 @@ namespace Game_Server
         }
     }
 
+    public class GameRoomManager
+    {
+        // 핸들러 리스트
+        // 로거
+        // 게임룸 리파지토리
+        public void HandleGameRoomMessage()
+        {
+            // 방 접속, 방 탈출, 방 갱신, 방 채팅, 플레이어 공격, 플레이어 기권
+        }
+
+        // 방 접속, 탈출, 갱신, 채팅, 공격, 기권 로직
+
+
+    }
+
     public class MainServer
     {
         // 유저 정보 임시 저장 버퍼 -> 수정 필요
+        private GameRoomRepository _gameRoomRepository;
         private Dictionary<string, string> _userNameBuffer;
         private List<ServerSocketHandler> _serverSocketHandlers;
         private List<User> _users;
@@ -154,6 +172,7 @@ namespace Game_Server
                 _logger.Log(Logger.LogLevel.Info, user.PhoneNumber);
             }
 
+            _gameRoomRepository = new GameRoomRepository();
             _userNameBuffer = new Dictionary<string, string>();
             _serverSocketHandlers = new List<ServerSocketHandler>();
             _messages = new Queue<Message>();
@@ -255,13 +274,25 @@ namespace Game_Server
 
                             handlerToParse.Send(handlerToParse.CreateTheData(new Message
                             {
+                                Name = handlerToParse.Name,
                                 RequestType = "LOGIN_RESPONSE",
                                 Text = "ACCEPT_NORMAL_USER"
+                            }));
+
+
+                            handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                            {
+                                Name = handlerToParse.Name,
+                                Destination = "MAIN_ROBBY",
+                                RequestType = "LOGIN_RESPONSE",
+                                Text = _gameRoomRepository.ConvertGameRoomListToJsonString()
                             }));
 
                             break;
                         }
                     }
+
+                    if (searchResult) continue;
 
                     if (!searchResult)
                     {
@@ -492,6 +523,130 @@ namespace Game_Server
                         }));
 
                         continue;
+                    }
+                }
+
+                if (message.RequestType.Equals("CHAT"))
+                {
+                    _logger.Log(Logger.LogLevel.Info, handlerToParse.Name + message.Text);
+                    if (message.Destination.Equals("MAIN_ROBBY"))
+                    {
+                        foreach(var handlerToSend in _serverSocketHandlers)
+                        {
+                            if (handlerToParse == handlerToSend) continue;
+                            string textToSend = "[" +  handlerToParse.Name + "] : " + message.Text;
+
+                            handlerToSend.Send(handlerToSend.CreateTheData(new Message
+                            {
+                                Name = handlerToSend.Name,
+                                RequestType = "CHAT_RESPONSE",
+                                Text = textToSend
+                            }));
+                        }
+
+                    }
+                }
+
+                if (message.Destination.Equals("GAME_ROOM"))
+                {
+                    
+                    // 테스트용
+                    if (message.RequestType.Equals("ENTERANCE_GAME_ROOM"))
+                    {
+                        GameRoom receivedGameRoom = _gameRoomRepository.ConvertJsonToGameRoom(message.Text);
+                        GameRoom gameRoomToRenew = new GameRoom
+                        {
+                            Name = receivedGameRoom.Name
+                        };
+
+                        if (_gameRoomRepository.CheckGameRoomMainUser(receivedGameRoom))
+                        {
+                            gameRoomToRenew.MainUser = handlerToParse.Name;
+                            gameRoomToRenew.SubUser = "NULL";
+                        }
+                        else
+                        {
+                            gameRoomToRenew.MainUser = receivedGameRoom.MainUser;
+                            gameRoomToRenew.SubUser = handlerToParse.Name;
+                        }
+
+                        // GAME ROOM 저장소 동기화
+                        _gameRoomRepository.RenewGameRoom(gameRoomToRenew);
+                        // 유저 방 입장 허가 
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            Destination = "MAIN_ROBBY",
+                            RequestType = "ENTERANCE_RESPONSE",
+                            Text = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew)
+                        }));
+
+                        // 모든 유저의 GAME ROOM 저장소 동기화
+
+                        foreach (var handlerToRenew in _serverSocketHandlers)
+                        {
+                            if (handlerToParse.Name.Equals(handlerToRenew.Name)) continue;
+                            handlerToRenew.Send(handlerToRenew.CreateTheData(new Message
+                            {
+                                Name = handlerToRenew.Name,
+                                Destination = "MAIN_ROBBY",
+                                RequestType = "GAMEROOM_RENEW_RESPONSE",
+                                Text = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew)
+                            }));
+
+                            _logger.Log(Logger.LogLevel.Info, gameRoomToRenew.MainUser + ": " + gameRoomToRenew.SubUser);
+                        }
+                        continue;
+                    }
+
+                    if (message.RequestType.Equals("EXIT_GAME_ROOM"))
+                    {
+                        GameRoom receivedGameRoom = _gameRoomRepository.ConvertJsonToGameRoom(message.Text);
+                        if (receivedGameRoom.MainUser.Equals(message.Name))
+                        {
+                            receivedGameRoom.MainUser = "NULL";
+                        } 
+                        else
+                        {
+                            receivedGameRoom.SubUser = "NULL";
+                        }
+
+                        _gameRoomRepository.RenewGameRoom(receivedGameRoom);
+                        _logger.Log(Logger.LogLevel.Info, receivedGameRoom.MainUser + ": " + receivedGameRoom.SubUser);
+                        GameRoom gameRoomToRenew = _gameRoomRepository.GetRoom(receivedGameRoom.Name);
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            Destination = "MAIN_ROBBY",
+                            RequestType = "EXIT_RESPONSE",
+                            Text = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew)
+                        }));
+
+                        foreach (var handlerToRenew in _serverSocketHandlers)
+                        {
+                            if (handlerToParse.Name.Equals(handlerToRenew.Name)) continue;
+                            handlerToRenew.Send(handlerToRenew.CreateTheData(new Message
+                            {
+                                Name = handlerToRenew.Name,
+                                Destination = "MAIN_ROBBY",
+                                RequestType = "GAMEROOM_RENEW_RESPONSE",
+                                Text = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew)
+                            }));
+
+                            _logger.Log(Logger.LogLevel.Info, gameRoomToRenew.MainUser + ": " + gameRoomToRenew.SubUser);
+                        }
+                        continue;
+                    }
+
+                    if (message.RequestType.Equals("RENEW_GAME_ROOMS"))
+                    {
+                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
+                        {
+                            Name = handlerToParse.Name,
+                            Destination = "MAIN_ROBBY",
+                            RequestType = "LOGIN_RESPONSE",
+                            Text = _gameRoomRepository.ConvertGameRoomListToJsonString()
+                        }));
                     }
                 }
             }

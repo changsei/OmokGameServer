@@ -39,9 +39,15 @@
     <Reference Include="Net-Framework-4.7.2-Model">
       <HintPath>..\..\Net-Framework-4.7.2-Model\Net-Framework-4.7.2-Model\bin\Debug\Net-Framework-4.7.2-Model.dll</HintPath>
     </Reference>
+    <Reference Include="Server-Repository">
+      <HintPath>..\..\Server-Repository\Server-Repository\bin\Debug\Server-Repository.dll</HintPath>
+    </Reference>
     <Reference Include="Socket-Handler, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
       <HintPath>..\..\Socket-Handler\Socket-Handler\bin\Debug\Socket-Handler.dll</HintPath>
+    </Reference>
+    <Reference Include="Socket-Handler-Form">
+      <HintPath>..\..\Game-Client-Forms\Game-Client-Forms-dll\Debug\net8.0-windows\Socket-Handler-Form.dll</HintPath>
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
