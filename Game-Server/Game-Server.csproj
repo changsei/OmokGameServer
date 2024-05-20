@@ -33,7 +33,8 @@
     <WarningLevel>4</WarningLevel>
   </PropertyGroup>
   <ItemGroup>
-    <Reference Include="DB-Handler">
+    <Reference Include="DB-Handler, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <SpecificVersion>False</SpecificVersion>
       <HintPath>..\..\DB-Handler\DB-Handler\bin\Debug\DB-Handler.dll</HintPath>
     </Reference>
     <Reference Include="Net-Framework-4.7.2-Model">
@@ -42,6 +43,7 @@
     <Reference Include="Server-Repository">
       <HintPath>..\..\Server-Repository\Server-Repository\bin\Debug\Server-Repository.dll</HintPath>
     </Reference>
+    <Reference Include="Server-Socket-Handler, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null" />
     <Reference Include="Socket-Handler, Version=1.0.0.0, Culture=neutral, processorArchitecture=MSIL">
       <SpecificVersion>False</SpecificVersion>
       <HintPath>..\..\Socket-Handler\Socket-Handler\bin\Debug\Socket-Handler.dll</HintPath>

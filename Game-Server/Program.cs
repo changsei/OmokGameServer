@@ -17,168 +17,535 @@ using System.Xml.Linq;
 using Net_Framework_4._7._2_Model;
 using Server_Repository;
 using Message = Net_Framework_4._7._2_Model.Message;
+using System.Runtime.Remoting.Messaging;
+using Server_Socket_Handler;
 
 namespace Game_Server
 {
-    public class ServerSocketHandler : SocketHandler
+    public class RepositoryManager
     {
-        private System.Timers.Timer _timer;
-        private int _time = 1000;
-        public int UserCount { get; set; }
-        public override void Parse(string jsonString)
+        private ServerSokcetReopsitory _serverSocketReopsitory;
+        private UserRepository _userRepository;
+        private GameRoomRepository _gameRoomRepository;
+        private Queue<Message> _messages;
+        private Logger _logger;
+        private object _messageLock;
+        private object _handlersLock;
+
+        public RepositoryManager(Queue<Message> messages, object messageLock)
         {
-            Message message = ConvertToMessage(jsonString);
-
-            // 연결 상태 처리 
-            if (message.RequestType.Equals("CONNECT")) return;
-
-            string log = this.Name + jsonString.ToString();
-            _logger.Log(Logger.LogLevel.Info, log);
-
-            // 계정 관련 요청 전 처리
-            if (message.RequestType.Equals("LOGIN"))
-            {
-                this.Name = message.Name;
-                EnqueueMessage(message);
-                return;
-            }
-
-            if (message.RequestType.Equals("REGIST"))
-            {
-                this.Name = message.Name + UserCount;
-                this.Send(CreateTheData(new Message
-                {
-                    Name = this.Name,
-                    RequestType = "REGIST_RESPONSE",
-                    Text = "CONNECTED"
-                })); 
-                return;
-            }
-
-            if (message.RequestType.Equals("UNREGIST"))
-            {
-                this.Name = message.Name + UserCount;
-                this.Send(CreateTheData(new Message
-                {
-                    Name = this.Name,
-                    RequestType = "UNREGIST_RESPONSE",
-                    Text = "CONNECTED"
-                }));
-                return;
-            }
-
-            if (message.RequestType.Equals("SEARCH"))
-            {
-                this.Name = message.Name + UserCount;
-                this.Send(CreateTheData(new Message
-                {
-                    Name = this.Name,
-                    RequestType = "SEARCH_RESPONSE",
-                    Text = "CONNECTED"
-                }));
-                EnqueueMessage(message);
-                return;
-            }
-
-            if (message.RequestType.Equals("DELETE"))
-            {
-                this.Send(CreateTheData(new Message
-                {
-                    Name = this.Name,
-                    RequestType = "DELETE_RESPONSE"
-                }));
-            }
-
-            // DB 접속, 게임 방 접속 등 나머지 데이터 처리 
-            EnqueueMessage(message);        
+            _userRepository = new UserRepository();
+            _gameRoomRepository = new GameRoomRepository();
+            _serverSocketReopsitory = new ServerSokcetReopsitory();
+            _handlersLock = _serverSocketReopsitory.GetLock();
+            _messageLock = messageLock;
+            _messages = messages;
+            _logger = Logger.Instance;
         }
 
-        public void StopToConnectionTimer()
+        public void InitializeSocketSettings(Socket serverSocket)
         {
-            if (_timer != null)
+            ServerSocketHandler _serverSocketHandler = new ServerSocketHandler();
+            _serverSocketHandler.SetLooger(_logger);
+            _logger.Log(Logger.LogLevel.Info, "클라이언트의 연결 요청을 대기합니다.");
+            _serverSocketHandler.Socket = serverSocket.Accept();
+            _logger.Log(Logger.LogLevel.Info, "클라이언트가 연결 되었습니다.");
+            _serverSocketHandler.OpenStream();
+            _serverSocketHandler.SetMessageQueue(_messages);
+            _serverSocketHandler.SetLockObject(_messageLock);
+            _serverSocketHandler.SetKeepAlive();
+            _serverSocketHandler.StartToConnectionTimer();
+            _serverSocketHandler.StartToReceive();
+
+            lock (_handlersLock)
             {
-                _timer.Stop();
-                _timer.Elapsed -= OnConnectiontimerElapsed; 
-                _timer.Dispose();
-                _timer = null;
+                _serverSocketReopsitory.AddServerSocketHandler(_serverSocketHandler);
+                _serverSocketHandler.UserCount = _serverSocketReopsitory.GetUserCount();
+                _logger.Log(Logger.LogLevel.Info, "유저 카운터: " + _serverSocketHandler.UserCount);
             }
         }
 
-        private void OnConnectiontimerElapsed(object sender, ElapsedEventArgs e)
+        public void RemoveServerSocketHandler(string handlerNameToRemove)
         {
-            if (Socket.Connected)
+            ServerSocketHandler handlerToRemove = _serverSocketReopsitory.RemoveServerSocketHandler(handlerNameToRemove);
+            int userCount = _serverSocketReopsitory.GetUserCount();
+            _logger.Log(Logger.LogLevel.Info, $"핸들러 제거 됨: {handlerNameToRemove} - 유저 카운터 {userCount}");
+        }
+
+        public ServerSocketHandler SearchServerSocketHandler(string handlerNameToSearch)
+        {
+            return _serverSocketReopsitory.GetServerSocketHandler(handlerNameToSearch);
+        }
+
+        public int GetServerSocketHandlerCount()
+        {
+            return _serverSocketReopsitory.GetUserCount();
+        }
+
+        public void BroadCastToServerSocketHandlers(Message message)
+        {
+            List<ServerSocketHandler> serverSocketHandlers = _serverSocketReopsitory.GetServerSocketHandlers();
+
+            foreach (ServerSocketHandler handler in serverSocketHandlers) {
+                handler.Send(handler.CreateTheData(message));
+            }
+        }
+
+        public GameRoomRepository GetGameRoomRepository()
+        {
+            return this._gameRoomRepository;
+        }
+
+        public UserRepository GetUserRepository()
+        {
+            return this._userRepository;
+        }
+    }
+    
+    public interface Handler
+    {
+        void HandleMessage(Message message, ServerSocketHandler serverSocketHandler);
+    }
+
+    public class ConnectionHandler : Handler
+    {
+        private RepositoryManager _repositoryManager;
+        private UserRepository _userRepository;
+        private GameRoomRepository _gameRoomRepository;
+
+        public ConnectionHandler(RepositoryManager repositoryManager)
+        {
+            this._repositoryManager = repositoryManager;
+            _userRepository = _repositoryManager.GetUserRepository();
+            _gameRoomRepository = _repositoryManager.GetGameRoomRepository();
+        }
+
+        public void HandleMessage(Message message, ServerSocketHandler serverSocketHandler)
+        {
+            ProcessDisConnectResponse(message, serverSocketHandler);
+        }
+
+        public void ProcessDisConnectResponse(Message message, ServerSocketHandler serverSocketHandler)
+        {
+            _repositoryManager.RemoveServerSocketHandler(serverSocketHandler.Name);
+            _userRepository.RemoveUser(message.Name);
+            _gameRoomRepository.UpdateDisconnect(message.Name);
+
+            try
             {
-                Message message = new Message { RequestType = "CONNECT" };
-                Send(CreateTheData(message));
+                // 유저가 비밀번호 변경을 하지 않았을 경우 버퍼에서 제거
+                _userRepository.RemoveUserBuffer(serverSocketHandler.Name);
+                Logger.Instance.Log(Logger.LogLevel.Info, $"[{serverSocketHandler.Name}] 의 임시 정보가 제거 되었습니다.");
             } 
-            else
-            {
-                StopToConnectionTimer();
-                _logger.Log(Logger.LogLevel.Info, this.Name + "의 Connection Timer 종료");
-            }
-        }
-
-        public void StartToConnectionTimer()
-        {
-            _timer = new System.Timers.Timer(_time);
-            _timer.Elapsed += OnConnectiontimerElapsed;
-            _timer.Start();
-            _logger.Log(Logger.LogLevel.Info, this.Name + "의 Connection Timer 시작");
+            catch (Exception e) { }
         }
     }
 
-    public class GameRoomManager
+    public class GameRoomHandler : Handler
     {
-        // 핸들러 리스트
-        // 로거
-        // 게임룸 리파지토리
-        public void HandleGameRoomMessage()
+        private RepositoryManager _repositoryManager;
+        private GameRoomRepository _gameRoomRepository;
+
+        public GameRoomHandler(RepositoryManager repositoryManager)
         {
+            this._repositoryManager = repositoryManager;
+            _gameRoomRepository = _repositoryManager.GetGameRoomRepository();
+        }
+
+        public void HandleMessage(Message message, ServerSocketHandler serverSocketHandler)
+        {
+
             // 방 접속, 방 탈출, 방 갱신, 방 채팅, 플레이어 공격, 플레이어 기권
+            if (message.RequestType.Equals("ENTERANCE_GAME_ROOM"))
+            {
+                GameRoom gameRoomToRenew = _gameRoomRepository.UpdateEnterance(message.Text, serverSocketHandler.Name);
+                ProcessExitAndEnterance(serverSocketHandler, gameRoomToRenew, "ENTERANCE_RESPONSE", "GAMEROOM_RENEW_RESPONSE");
+                return;
+            }
+
+            if (message.RequestType.Equals("EXIT_GAME_ROOM"))
+            {
+                GameRoom gameRoomToRenew = _gameRoomRepository.UpdateDisconnect(serverSocketHandler.Name);
+                ProcessExitAndEnterance(serverSocketHandler, gameRoomToRenew, "EXIT_RESPONSE", "GAMEROOM_RENEW_RESPONSE");
+                return;
+            }
+
         }
 
         // 방 접속, 탈출, 갱신, 채팅, 공격, 기권 로직
 
+        private void ProcessExitAndEnterance(ServerSocketHandler serverSocketHandler, GameRoom gameRoom, string personalResponseType, string broadcastResponseType)
+        {
+            string gameRoomJson = _gameRoomRepository.ConvertGameRoomToJson(gameRoom);
 
+            if (serverSocketHandler != null)
+            {
+                // 개별 유저에게 정보 전송
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    Destination = "MAIN_ROBBY",
+                    RequestType = personalResponseType,
+                    Text = gameRoomJson
+                }));
+
+                // 모든 유저에게 게임 룸 저장소 동기화 메시지 전송
+                _repositoryManager.BroadCastToServerSocketHandlers(new Message
+                {
+                    Destination = "MAIN_ROBBY",
+                    RequestType = broadcastResponseType,
+                    Text = gameRoomJson
+                });
+            }
+        }
     }
+
+    public class MainRobbyHandler : Handler
+    {
+        private RepositoryManager _repositoryManager;
+
+        public void HandleMessage(Message message, ServerSocketHandler serverSocketHandler)
+        {
+            // 전체 채팅, 메인 로비 퇴장, 특정 회원 정보 조회
+        }
+    }
+
+    public class LoginHandler : Handler
+    {
+        private RepositoryManager _repositoryManager;
+        private DBHandler _dbHandler;
+        private GameRoomRepository _gameRoomRepository;
+        private UserRepository _userRepository;
+
+        public LoginHandler(RepositoryManager repositoryManager)
+        {
+            this._repositoryManager = repositoryManager;
+            _gameRoomRepository = _repositoryManager.GetGameRoomRepository();
+            _userRepository = _repositoryManager.GetUserRepository();
+            _dbHandler = DBHandler.Instance;
+            _dbHandler.ConnectToDB();
+        }
+
+        public void HandleMessage(Message message, ServerSocketHandler serverSocketHandler)
+        {
+            if (message.RequestType.Equals("LOGIN"))
+            {
+                ProcessLogin(message, serverSocketHandler, "LOGIN_RESPONSE");
+                return;
+            }
+            
+            if (message.RequestType.Equals("SEARCH_USER_ID"))
+            {
+                ProcessSearchUserId(message, serverSocketHandler, "SEARCH_RESPONSE");
+                return;
+            }
+
+            if (message.RequestType.Equals("SEARCH_USER_PW"))
+            {
+                ProcessSearchUserPassword(message, serverSocketHandler, "SEARCH_RESPONSE");
+                return;
+            }
+
+            if (message.RequestType.Equals("REGIST_USER_ID/PW"))
+            {
+                ProcessRegist(message, serverSocketHandler, "REGIST_RESPONSE");
+                return;
+            }
+
+            if (message.RequestType.Equals("UNREGIST_USER_ID/PW"))
+            {
+                ProcessUnRegist(message, serverSocketHandler, "UNREGIST_RESPONSE");
+                return;
+            }
+
+            if (message.RequestType.Equals("RENEW_USER_PASSWORD"))
+            {
+                ProcessRenewUserPassword(message, serverSocketHandler, "RENEW_RESPONSE");
+            }
+
+        }
+
+        private void ProcessLogin(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
+        {
+            User user = _userRepository.ConvertJsonToUser(message.Text);
+            bool resultQuery = Login(user.ID, user.Password);
+ 
+            if (resultQuery)
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = user.ID,
+                    RequestType = personalRequestType,
+                    Text = "ACCEPT_NORMAL_USER"
+                }));
+
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = user.ID,
+                    Destination = "MAIN_ROBBY",
+                    RequestType = personalRequestType,
+                    Text = _gameRoomRepository.ConvertGameRoomListToJsonString()
+                }));
+            } 
+            else
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    RequestType = personalRequestType,
+                    Text = "NOT_FOUND_USER"
+                }));
+            }
+        }
+        
+        private void ProcessSearchUserId(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
+        {
+            string phoneNumber = message.Text;
+            User userToFind = FindUserByPhoneNumber(phoneNumber);
+            bool resultQuery = userToFind != null;
+
+            if (resultQuery)
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    Destination = "ID_FORM",
+                    RequestType = personalRequestType,
+                    Text = userToFind.ID
+                }));
+            }
+            else
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    RequestType = personalRequestType,
+                    Text = "REFUSED"
+                }));
+            }
+        }
+
+
+        private void ProcessSearchUserPassword(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
+        {
+            string userId = message.Text;
+            User userToSearch = _dbHandler.SearchByIdForPassword(userId) ;
+            bool resultQuery = userToSearch != null;
+
+            if (userToSearch != null)
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    Destination = "PASSWORD_FORM",
+                    RequestType = "SEARCH_RESPONSE",
+                    Text = "CMPLETED"
+                }));
+
+                _userRepository.AddUserBuffer(serverSocketHandler.Name, userToSearch);
+            }
+            else
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    RequestType = personalRequestType,
+                    Text = "REFUSED"
+                }));
+            }
+        }
+
+        private void ProcessRegist(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
+        {
+            User userToRegist = _userRepository.ConvertJsonToUser(message.Text);
+            bool resultQuery = Register(userToRegist);
+            SendResponse(serverSocketHandler, personalRequestType, resultQuery, serverSocketHandler.Name);
+            if (resultQuery) { Logger.Instance.Log(Logger.LogLevel.Info, $"[{userToRegist.ID}] 회원 정보가 DB에 등록 되었습니다."); }
+
+/*            if (Register(userToRegist)) 
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    RequestType = "REGIST_RESPONSE",
+                    Text = "COMPLETED"
+                }));
+                Logger.Instance.Log(Logger.LogLevel.Info, userToRegist.ID + " 회원 정보가 DB에 등록 되었습니다.");
+            }
+            else
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    RequestType = personalRequestType,
+                    Text = "REFUSED"
+                }));
+            }*/
+        }
+
+        private void ProcessUnRegist(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
+        {
+            User userToUnRegist = _userRepository.ConvertJsonToUser(message.Text);
+            bool resultQuery = Unregister(userToUnRegist.ID, userToUnRegist.Password);
+            SendResponse(serverSocketHandler, personalRequestType, resultQuery, serverSocketHandler.Name);
+            if (resultQuery) { Logger.Instance.Log(Logger.LogLevel.Info, $"[{userToUnRegist.ID}] 회원 정보가 DB에서 제거 되었습니다."); }
+
+/*            if (Unregister(userToUnRegist.ID, userToUnRegist.Password)) 
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    RequestType = "UNREGIST_RESPONSE",
+                    Text = "COMPLETED"
+                }));
+
+                Logger.Instance.Log(Logger.LogLevel.Info, userToUnRegist.ID + " 회원 정보가 DB에서 제거 되었습니다.");
+            }
+            else
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    RequestType = personalRequestType,
+                    Text = "REFUSED"
+                }));
+            }*/
+        }
+
+        private void ProcessRenewUserPassword(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
+        {
+            User userToReceived = _userRepository.ConvertJsonToUser(message.Text);
+            User userToRenewPassword = _userRepository.GetUserBuffer(userToReceived.ID);
+            bool resultQuery = ResetPassword(userToRenewPassword.ID, userToReceived.Password);
+            SendResponse(serverSocketHandler, personalRequestType, resultQuery, serverSocketHandler.Name);
+            if (resultQuery) { _userRepository.RemoveUserBuffer(userToRenewPassword.ID); }
+
+/*
+            if (ResetPassword(userToRenewPassword.ID, userToReceived.Password))
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    RequestType = personalRequestType,
+                    Text = "COMPLETED"
+                }));
+
+                _userRepository.RemoveUserBuffer(userToRenewPassword.ID);
+                Logger.Instance.Log(Logger.LogLevel.Info, userToRenewPassword.ID + " 의 비밀번호 변경이 완료 되었습니다.");
+            }
+            else
+            {
+                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+                {
+                    Name = serverSocketHandler.Name,
+                    RequestType = personalRequestType,
+                    Text = "REFUSED"
+                }));
+            }*/
+        }
+
+        // 함수 추가 
+        private void SendResponse(ServerSocketHandler serverSocketHandler, string personalRequestType, bool queryResult, string userName)
+        {
+            string responseText = queryResult ? "COMPLETED" : "REFUSED";
+            serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+            {
+                Name = userName,
+                RequestType = personalRequestType,
+                Text = responseText
+            }));
+
+            if (queryResult)
+            {
+                Logger.Instance.Log(Logger.LogLevel.Info, $"[{userName}] [{(responseText == "COMPLETED" ? " 작업이 완료 되었습니다." : " 작업이 거부되었습니다.")}]");
+            }
+        }
+
+        private bool Login(string userID, string password)
+        {
+            User user = _dbHandler.SearchByIdForPassword(userID);
+            if (user == null)
+            {
+                return false; 
+            }
+            return user.Password == password; 
+        }
+
+        private bool Register(User newUser)
+        {
+            User existingUser = _dbHandler.SearchByIdForPassword(newUser.ID);
+            if (existingUser != null)
+            {
+                return false; 
+            }
+
+            return _dbHandler.Insert(newUser); 
+        }
+
+        private bool Unregister(string userID, string password)
+        {
+            User user = _dbHandler.SearchByIdForPassword(userID);
+            if (user == null || user.Password != password)
+            {
+                return false; 
+            }
+
+            return _dbHandler.Delete(user); 
+        }
+
+        private User FindUserByPhoneNumber(string phoneNumber)
+        {
+            return _dbHandler.SearchByPhoneNumber(phoneNumber); 
+        }
+
+        public bool ResetPassword(string userID, string newPassword)
+        {
+            User user = _dbHandler.SearchByIdForPassword(userID);
+            if (user == null)
+            {
+                return false;
+            }
+
+            user.Password = newPassword;
+            return _dbHandler.Update(user);
+        }
+    }
+
 
     public class MainServer
     {
-        // 유저 정보 임시 저장 버퍼 -> 수정 필요
-        private GameRoomRepository _gameRoomRepository;
-        private Dictionary<string, string> _userNameBuffer;
-        private List<ServerSocketHandler> _serverSocketHandlers;
-        private List<User> _users;
+        // 모든 핸들러에 RepositoryManager 의존성 주입, string으로 매핑 
+        private RepositoryManager _repositoryManager;
+        private Dictionary<string, Handler> _processhandlers;
         private Queue<Message> _messages;
-        private ServerSocketHandler _serverSocketHandler;
-        private DBHandler _dbHandler;
         private Socket _serverSocket;
         private Thread _thread;
         private Logger _logger;
         private int _port;
-        private int _userCount;
         private object _messagesLock;
-        private object _handlersLock;
 
         public MainServer()
         {
             _logger = Logger.Instance;
-            _dbHandler = DBHandler.Instance;
-            _dbHandler.ConnectToDB();
-            _users = _dbHandler.SearchAll();
-
-            foreach (var user in _users)
-            {
-                _logger.Log(Logger.LogLevel.Info, user.PhoneNumber);
-            }
-
-            _gameRoomRepository = new GameRoomRepository();
-            _userNameBuffer = new Dictionary<string, string>();
-            _serverSocketHandlers = new List<ServerSocketHandler>();
             _messages = new Queue<Message>();
             _port = 8080;
             _messagesLock = new object();
-            _handlersLock = new object();
+            _repositoryManager = new RepositoryManager(_messages, _messagesLock);
+            _processhandlers = initializeProcessHandlers();
+        }
+
+        public Dictionary<string, Handler> initializeProcessHandlers()
+        {
+            // 로그인 메시지를 받았을 때 DB와 비교 후 User 목록 추가
+            Dictionary<string, Handler>  processhandlers = new Dictionary<string, Handler>
+            {
+                // 리퀘스트 타입으로 구분 -> 추후에 목적지로 수정  
+                { "DISCONNECT", new ConnectionHandler(_repositoryManager) },
+                // 목적지로 구분 
+                { "GAME_ROOM", new GameRoomHandler(_repositoryManager) },
+                { "DATABASE", new LoginHandler(_repositoryManager) }
+            };
+
+            return processhandlers;
         }
 
         public void AcceptToConnection()
@@ -192,24 +559,7 @@ namespace Game_Server
 
                 while (true)
                 {
-                    _serverSocketHandler = new ServerSocketHandler();
-                    _serverSocketHandler.SetLooger(_logger);
-                    _logger.Log(Logger.LogLevel.Info, "클라이언트의 연결 요청을 대기합니다.");
-                    _serverSocketHandler.Socket = _serverSocket.Accept();
-                    _logger.Log(Logger.LogLevel.Info, "클라이언트가 연결 되었습니다.");
-                    _serverSocketHandler.OpenStream();
-                    _serverSocketHandler.SetMessageQueue(_messages);
-                    _serverSocketHandler.SetLockObject(_messagesLock);
-                    _serverSocketHandler.SetKeepAlive();
-                    _serverSocketHandler.StartToConnectionTimer();
-                    _serverSocketHandler.StartToReceive();
-
-                    lock (_handlersLock)
-                    {
-                        _serverSocketHandlers.Add(_serverSocketHandler);
-                        _serverSocketHandler.UserCount = ++_userCount;
-                        _logger.Log(Logger.LogLevel.Info, "유저 카운터: " + _serverSocketHandler.UserCount);
-                    }               
+                    _repositoryManager.InitializeSocketSettings(_serverSocket);
                 }
             }
             catch (IOException e)
@@ -236,294 +586,31 @@ namespace Game_Server
                 }
                 
                 Message message = DequeueFromMessages();
+                _logger.Log(Logger.LogLevel.Info, message.RequestType); 
+                if (_repositoryManager.GetServerSocketHandlerCount() < 0) continue;
 
-                _logger.Log(Logger.LogLevel.Info, message.RequestType);
-
-                if (_serverSocketHandlers.Count < 0) continue;
-
-                var handlerToParse = _serverSocketHandlers.FirstOrDefault(handler => handler.Name.Equals(message.Name));
-
+                ServerSocketHandler handlerToParse = _repositoryManager.SearchServerSocketHandler(message.Name);
                 if (handlerToParse == null) continue;
 
                 if (message.RequestType.Equals("DISCONNECT"))
                 {
-                    lock (_handlersLock)
-                    {
-                        _serverSocketHandlers.Remove(handlerToParse);
-                        --_userCount;
-                        string log = "핸들러 제거됨: " + handlerToParse.Name + ", 유저 카운터: " + (_userCount);
-                        _logger.Log(Logger.LogLevel.Info, log);
-                        continue;
-                    }
-                } 
-
-                if (message.RequestType.Equals("LOGIN"))
+                    // 모든 if문 제거 후 하나의 로직으로 통합 가능 
+                    Handler handler = _processhandlers[message.RequestType];
+                    handler.HandleMessage(message, handlerToParse);
+                    continue;
+                }
+                
+                if (message.Destination.Equals("DATABASE"))
                 {
-                    bool searchResult = false;
-
-                    foreach (var user in _users)
-                    {
-                        if (!handlerToParse.Name.Equals(user.ID)) continue;
-
-                        if (message.Text == user.Password)
-                        {
-                            searchResult = true;
-
-                            string log = "유저 로그인: " + handlerToParse.Name + ", 유저 카운터: " + (_userCount);
-                            _logger.Log(Logger.LogLevel.Info, log);
-
-                            handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                            {
-                                Name = handlerToParse.Name,
-                                RequestType = "LOGIN_RESPONSE",
-                                Text = "ACCEPT_NORMAL_USER"
-                            }));
-
-
-                            handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                            {
-                                Name = handlerToParse.Name,
-                                Destination = "MAIN_ROBBY",
-                                RequestType = "LOGIN_RESPONSE",
-                                Text = _gameRoomRepository.ConvertGameRoomListToJsonString()
-                            }));
-
-                            break;
-                        }
-                    }
-
-                    if (searchResult) continue;
-
-                    if (!searchResult)
-                    {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            // 수정 필요
-                            RequestType = "LOGIN_RESPONSE",
-                            Text = "NOT_FOUNT_USER"
-                        }));
-
-                        continue;
-                    }            
+                    Handler handler = _processhandlers[message.Destination];
+                    handler.HandleMessage(message, handlerToParse);
+                    continue;
                 }
 
-                if (message.RequestType.Equals("REGIST_USER_ID/PW"))
+                if (message.Destination.Equals("GAME_ROOM"))
                 {
-                    bool registResult = false;
-                    string[] textArr = SplitTextInMessage(message.Text);
-                    User insertToUser = new User
-                    {
-                        ID = textArr[0],
-                        Name = textArr[1],
-                        Password = textArr[2],
-                        PhoneNumber = textArr[3]
-                    };
-
-                    foreach (var user in _users)
-                    {
-                        if (insertToUser.ID.Equals(user.ID)) continue;
-                        _dbHandler.Insert(insertToUser);
-
-                        _logger.Log(Logger.LogLevel.Info, message.Name + " 회원 정보가 DB에 등록 되었습니다.");
-                        registResult = true;
-
-                        break;
-                    }
-
-                    if (!registResult)
-                    {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            RequestType = "REGIST_RESPONSE",
-                            Text = "REFUSED"
-                        }));
-
-                        continue;
-                    }
-
-                    if (registResult)
-                    {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            RequestType = "REGIST_RESPONSE",
-                            Text = "COMPLETED"
-                        }));
-
-                        _users = _dbHandler.SearchAll();
-                    }
-                }
-
-                if (message.RequestType.Equals("UNREGIST_USER_ID/PW"))
-                {
-                    bool unregistResult = false;
-                    string[] textArr = SplitTextInMessage(message.Text);
-                    User deleteToUser = new User
-                    {
-                        ID = textArr[0],
-                        Password = textArr[1]
-                    };
-
-                    foreach (var user in _users)
-                    {
-                        if (!deleteToUser.ID.Equals(user.ID)) continue;
-
-                        if (!deleteToUser.Password.Equals(user.Password)) break;
-
-                        _dbHandler.Delete(deleteToUser);
-                        _logger.Log(Logger.LogLevel.Info, message.Name + " 회원 정보가 DB에서 제거 되었습니다.");
-
-                        unregistResult = true;
-                        break;
-                    }
-
-                    if (!unregistResult) {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            RequestType = "UNREGIST_RESPONSE",
-                            Text = "REFUSED"
-                        }));
-
-                        continue;
-                    }
-
-                    if (unregistResult)
-                    {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            RequestType = "UNREGIST_RESPONSE",
-                            Text = "COMPLETED"
-                        }));
-
-                        _users = _dbHandler.SearchAll();
-                    }
-                }
-
-                if (message.RequestType.Equals("SEARCH_USER_ID"))
-                {
-                    bool searchResult = false;
-                    User searchToUser = new User
-                    {
-                        PhoneNumber = message.Text
-                    };
-
-                    foreach (var user in _users)
-                    {
-                        if (!searchToUser.PhoneNumber.Equals(user.PhoneNumber)) continue;
-                        searchResult = true;    
-
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            Destination = "ID_FORM",
-                            RequestType = "SEARCH_RESPONSE",
-                            Text = user.ID
-                        }));
-                    }
-
-                    if (!searchResult) {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            RequestType = "SEARCH_RESPONSE",
-                            Text = "REFUSED"
-                        }));
-                    }
-                }
-
-                if (message.RequestType.Equals("SEARCH_USER_PW"))
-                {
-                    bool searchResult = false;
-                    User searchToUser = new User
-                    {
-                        ID = message.Text
-                    };
-
-                    foreach (var user in _users)
-                    {
-                        if (searchToUser.ID.Equals(user.ID))
-                        {
-                            _userNameBuffer.Add(handlerToParse.Name, user.ID);
-                            searchResult = true;
-                            break;
-                        }
-                    }
-
-                    if (!searchResult)
-                    {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            RequestType = "SEARCH_RESPONSE",
-                            Text = "REFUSED"
-                        }));
-                        continue;
-                    }
-
-                    if (searchResult)
-                    {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            Destination = "PASSWORD_FORM",
-                            RequestType = "SEARCH_RESPONSE",
-                            Text = "ACCEPTED"
-                        }));
-                        continue;
-                    }
-                }
-
-                if (message.RequestType.Equals("RENEW_USER_PASSOWRD"))
-                {
-                    string userId = _userNameBuffer[message.Name];
-                    bool updateResult = false;
-
-                    foreach (var user in _users)
-                    {
-                        if (userId.Equals(user.ID))
-                        {
-                            User updateToUser = new User
-                            {
-                                ID = user.ID,
-                                Password = message.Text,
-                                Name = user.Name,
-                                PhoneNumber = user.PhoneNumber
-                            };
-
-                            _dbHandler.Update(updateToUser);
-                            _userNameBuffer.Remove(message.Name);
-                            _users = _dbHandler.SearchAll();
-                            updateResult = true;
-                            _logger.Log(Logger.LogLevel.Info, message.Name + " 의 비밀번호 변경이 완료 되었습니다.");
-                            break;
-                        }
-                    }
-
-                    if (!updateResult)
-                    {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            RequestType = "RENEW_RESPONSE",
-                            Text = "REFUSED"
-                        }));
-                        continue;
-                    }
-
-                    if (updateResult)
-                    {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            RequestType = "RENEW_RESPONSE",
-                            Text = "COMPLETED"
-                        }));
-
-                        continue;
-                    }
+                    Handler handler = _processhandlers[message.Destination];
+                    handler.HandleMessage(message, handlerToParse);         
                 }
 
                 if (message.RequestType.Equals("CHAT"))
@@ -531,122 +618,13 @@ namespace Game_Server
                     _logger.Log(Logger.LogLevel.Info, handlerToParse.Name + message.Text);
                     if (message.Destination.Equals("MAIN_ROBBY"))
                     {
-                        foreach(var handlerToSend in _serverSocketHandlers)
+                        string textToSend = "[" + handlerToParse.Name + "] : " + message.Text;
+
+                        _repositoryManager.BroadCastToServerSocketHandlers(new Message
                         {
-                            if (handlerToParse == handlerToSend) continue;
-                            string textToSend = "[" +  handlerToParse.Name + "] : " + message.Text;
-
-                            handlerToSend.Send(handlerToSend.CreateTheData(new Message
-                            {
-                                Name = handlerToSend.Name,
-                                RequestType = "CHAT_RESPONSE",
-                                Text = textToSend
-                            }));
-                        }
-
-                    }
-                }
-
-                if (message.Destination.Equals("GAME_ROOM"))
-                {
-                    
-                    // 테스트용
-                    if (message.RequestType.Equals("ENTERANCE_GAME_ROOM"))
-                    {
-                        GameRoom receivedGameRoom = _gameRoomRepository.ConvertJsonToGameRoom(message.Text);
-                        GameRoom gameRoomToRenew = new GameRoom
-                        {
-                            Name = receivedGameRoom.Name
-                        };
-
-                        if (_gameRoomRepository.CheckGameRoomMainUser(receivedGameRoom))
-                        {
-                            gameRoomToRenew.MainUser = handlerToParse.Name;
-                            gameRoomToRenew.SubUser = "NULL";
-                        }
-                        else
-                        {
-                            gameRoomToRenew.MainUser = receivedGameRoom.MainUser;
-                            gameRoomToRenew.SubUser = handlerToParse.Name;
-                        }
-
-                        // GAME ROOM 저장소 동기화
-                        _gameRoomRepository.RenewGameRoom(gameRoomToRenew);
-                        // 유저 방 입장 허가 
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            Destination = "MAIN_ROBBY",
-                            RequestType = "ENTERANCE_RESPONSE",
-                            Text = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew)
-                        }));
-
-                        // 모든 유저의 GAME ROOM 저장소 동기화
-
-                        foreach (var handlerToRenew in _serverSocketHandlers)
-                        {
-                            if (handlerToParse.Name.Equals(handlerToRenew.Name)) continue;
-                            handlerToRenew.Send(handlerToRenew.CreateTheData(new Message
-                            {
-                                Name = handlerToRenew.Name,
-                                Destination = "MAIN_ROBBY",
-                                RequestType = "GAMEROOM_RENEW_RESPONSE",
-                                Text = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew)
-                            }));
-
-                            _logger.Log(Logger.LogLevel.Info, gameRoomToRenew.MainUser + ": " + gameRoomToRenew.SubUser);
-                        }
-                        continue;
-                    }
-
-                    if (message.RequestType.Equals("EXIT_GAME_ROOM"))
-                    {
-                        GameRoom receivedGameRoom = _gameRoomRepository.ConvertJsonToGameRoom(message.Text);
-                        if (receivedGameRoom.MainUser.Equals(message.Name))
-                        {
-                            receivedGameRoom.MainUser = "NULL";
-                        } 
-                        else
-                        {
-                            receivedGameRoom.SubUser = "NULL";
-                        }
-
-                        _gameRoomRepository.RenewGameRoom(receivedGameRoom);
-                        _logger.Log(Logger.LogLevel.Info, receivedGameRoom.MainUser + ": " + receivedGameRoom.SubUser);
-                        GameRoom gameRoomToRenew = _gameRoomRepository.GetRoom(receivedGameRoom.Name);
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            Destination = "MAIN_ROBBY",
-                            RequestType = "EXIT_RESPONSE",
-                            Text = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew)
-                        }));
-
-                        foreach (var handlerToRenew in _serverSocketHandlers)
-                        {
-                            if (handlerToParse.Name.Equals(handlerToRenew.Name)) continue;
-                            handlerToRenew.Send(handlerToRenew.CreateTheData(new Message
-                            {
-                                Name = handlerToRenew.Name,
-                                Destination = "MAIN_ROBBY",
-                                RequestType = "GAMEROOM_RENEW_RESPONSE",
-                                Text = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew)
-                            }));
-
-                            _logger.Log(Logger.LogLevel.Info, gameRoomToRenew.MainUser + ": " + gameRoomToRenew.SubUser);
-                        }
-                        continue;
-                    }
-
-                    if (message.RequestType.Equals("RENEW_GAME_ROOMS"))
-                    {
-                        handlerToParse.Send(handlerToParse.CreateTheData(new Message
-                        {
-                            Name = handlerToParse.Name,
-                            Destination = "MAIN_ROBBY",
-                            RequestType = "LOGIN_RESPONSE",
-                            Text = _gameRoomRepository.ConvertGameRoomListToJsonString()
-                        }));
+                            RequestType = "CHAT_RESPONSE",
+                            Text = textToSend
+                        });
                     }
                 }
             }
@@ -656,19 +634,6 @@ namespace Game_Server
         {
             _thread = new Thread(new ThreadStart(Parse));
             _thread.Start();
-        }
-
-        public void SendToClient(Func<Message> delegateMessage)
-        {
-            Message message = delegateMessage();
-            string data = _serverSocketHandler.CreateTheData(message);
-            _serverSocketHandler.Send(data);
-        }
-
-        public string[] SplitTextInMessage(string textInMessage)
-        {
-            string[] textArr = textInMessage.ToString().Split(',');
-            return textArr;
         }
     }
 
