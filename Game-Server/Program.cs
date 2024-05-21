@@ -19,6 +19,8 @@ using Server_Repository;
 using Message = Net_Framework_4._7._2_Model.Message;
 using System.Runtime.Remoting.Messaging;
 using Server_Socket_Handler;
+using System.Diagnostics.Eventing.Reader;
+using Server_Omok_Game;
 
 namespace Game_Server
 {
@@ -47,9 +49,9 @@ namespace Game_Server
         {
             ServerSocketHandler _serverSocketHandler = new ServerSocketHandler();
             _serverSocketHandler.SetLooger(_logger);
-            _logger.Log(Logger.LogLevel.Info, "클라이언트의 연결 요청을 대기합니다.");
+            _logger.Log(Logger.LogLevel.Info, $"[클라이언트의 연결 요청 대기]");
             _serverSocketHandler.Socket = serverSocket.Accept();
-            _logger.Log(Logger.LogLevel.Info, "클라이언트가 연결 되었습니다.");
+            _logger.Log(Logger.LogLevel.Info, $"[클라이언트 연결 승인]");
             _serverSocketHandler.OpenStream();
             _serverSocketHandler.SetMessageQueue(_messages);
             _serverSocketHandler.SetLockObject(_messageLock);
@@ -61,7 +63,7 @@ namespace Game_Server
             {
                 _serverSocketReopsitory.AddServerSocketHandler(_serverSocketHandler);
                 _serverSocketHandler.UserCount = _serverSocketReopsitory.GetUserCount();
-                _logger.Log(Logger.LogLevel.Info, "유저 카운터: " + _serverSocketHandler.UserCount);
+                _logger.Log(Logger.LogLevel.Info, $"[유저 카운터]: {_serverSocketHandler.UserCount}");
             }
         }
 
@@ -69,12 +71,16 @@ namespace Game_Server
         {
             ServerSocketHandler handlerToRemove = _serverSocketReopsitory.RemoveServerSocketHandler(handlerNameToRemove);
             int userCount = _serverSocketReopsitory.GetUserCount();
-            _logger.Log(Logger.LogLevel.Info, $"핸들러 제거 됨: {handlerNameToRemove} - 유저 카운터 {userCount}");
+            _logger.Log(Logger.LogLevel.Info, $"[핸들러 제거]: {handlerNameToRemove} - [유저 카운터]: {userCount}");
         }
 
         public ServerSocketHandler SearchServerSocketHandler(string handlerNameToSearch)
         {
             return _serverSocketReopsitory.GetServerSocketHandler(handlerNameToSearch);
+        }
+
+        public List<ServerSocketHandler> GetServerSocketHanlders() {
+            return _serverSocketReopsitory.GetServerSocketHandlers();
         }
 
         public int GetServerSocketHandlerCount()
@@ -134,10 +140,12 @@ namespace Game_Server
             try
             {
                 // 유저가 비밀번호 변경을 하지 않았을 경우 버퍼에서 제거
-                _userRepository.RemoveUserBuffer(serverSocketHandler.Name);
+                _userRepository.RemoveUserBuffer(serverSocketHandler.Name);       
                 Logger.Instance.Log(Logger.LogLevel.Info, $"[{serverSocketHandler.Name}] 의 임시 정보가 제거 되었습니다.");
             } 
-            catch (Exception e) { }
+            catch (Exception e) {
+                Logger.Instance.Log(Logger.LogLevel.Info, $"[{e.ToString()}]");
+            }
         }
     }
 
@@ -158,8 +166,9 @@ namespace Game_Server
             // 방 접속, 방 탈출, 방 갱신, 방 채팅, 플레이어 공격, 플레이어 기권
             if (message.RequestType.Equals("ENTERANCE_GAME_ROOM"))
             {
-                GameRoom gameRoomToRenew = _gameRoomRepository.UpdateEnterance(message.Text, serverSocketHandler.Name);
+                GameRoom gameRoomToRenew = _gameRoomRepository.InitializeGameRoom(message.Text, serverSocketHandler.Name);
                 ProcessExitAndEnterance(serverSocketHandler, gameRoomToRenew, "ENTERANCE_RESPONSE", "GAMEROOM_RENEW_RESPONSE");
+                serverSocketHandler.SetCurrentRoom(gameRoomToRenew.Name);
                 return;
             }
 
@@ -167,11 +176,35 @@ namespace Game_Server
             {
                 GameRoom gameRoomToRenew = _gameRoomRepository.UpdateDisconnect(serverSocketHandler.Name);
                 ProcessExitAndEnterance(serverSocketHandler, gameRoomToRenew, "EXIT_RESPONSE", "GAMEROOM_RENEW_RESPONSE");
+                serverSocketHandler.SetCurrentRoom("MAIN_ROBBY");
                 return;
             }
 
-        }
+            if (message.RequestType.Equals("CHAT"))
+            {
+                ProcessChatResponse(message, serverSocketHandler, "CHAT_RESPONSE");
+                return;
+            }
 
+            if (message.RequestType.Equals("READY_TO_START"))
+            {
+                ProcessReadyToStartResponse(message, serverSocketHandler);
+                return;
+            }
+
+            if (message.RequestType.Equals("SURRENDER"))
+            {
+                ProcessSurrenderResponse(message, serverSocketHandler, "SURRENDER_RESPONSE");
+                return;
+            }
+
+            if (message.RequestType.Equals("MOVE_STONE"))
+            {
+                ProcessMoveStoneResponse(message, serverSocketHandler, "MOVE_STONE_RESPONSE");
+                Logger.Instance.Log(Logger.LogLevel.Info, $"[유저 메시지]: {message.Text}");
+                return;
+            }
+        }
         // 방 접속, 탈출, 갱신, 채팅, 공격, 기권 로직
 
         private void ProcessExitAndEnterance(ServerSocketHandler serverSocketHandler, GameRoom gameRoom, string personalResponseType, string broadcastResponseType)
@@ -198,15 +231,141 @@ namespace Game_Server
                 });
             }
         }
+
+        private void ProcessChatResponse(Message message, ServerSocketHandler serverSocketHandler, string personalResponseType)
+        {
+            string textToSend = $"[{serverSocketHandler.Name}]: {message.Text}";
+
+            foreach (ServerSocketHandler handlerToChat in _repositoryManager.GetServerSocketHanlders())
+            {
+                if (serverSocketHandler.Name.Equals(handlerToChat.Name)) continue;
+                if (!handlerToChat.GetCurrentRoom().Equals(serverSocketHandler.GetCurrentRoom())) continue;
+
+                handlerToChat.Send(handlerToChat.CreateTheData(new Message
+                {
+                    Name = handlerToChat.Name,
+                    Destination = "GAME_ROOM",
+                    RequestType = personalResponseType,
+                    Text = textToSend
+                }));
+
+                break;
+            }
+        }
+
+        private void ProcessReadyToStartResponse(Message message, ServerSocketHandler serverSocketHandler)
+        {
+            GameRoom gameRoomToRenew = _gameRoomRepository.GetRoom(message.Text);
+            if (serverSocketHandler.Name.Equals(gameRoomToRenew.MainUser))
+            {
+                gameRoomToRenew.MainUserReady = true;
+            }
+
+            if (serverSocketHandler.Name.Equals(gameRoomToRenew.SubUser))
+            {
+                gameRoomToRenew.SubUserReady = true;
+            }
+
+            string textToSend = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew);
+
+            if (gameRoomToRenew.CheckReadyToStart())
+            {
+                _gameRoomRepository.GetGameHandlerByRoomName(gameRoomToRenew.Name).Initialize();
+                BroadcastToGameRoom(serverSocketHandler, "START_TO_GAME_RESPONSE", textToSend);
+            } else
+            {
+                BroadcastToGameRoom(serverSocketHandler, "READY_TO_GAME_RESPONSE", textToSend);
+            }
+        }
+
+        private void ProcessSurrenderResponse(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
+        {
+            GameRoom gameRoomToRenew = _gameRoomRepository.GetRoom(message.Text);
+            gameRoomToRenew.SubUserReady = false;
+            gameRoomToRenew.MainUserReady = false;
+            string textToSend = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew);
+            this.BroadcastToGameRoom(serverSocketHandler, personalRequestType, textToSend);
+
+            if (serverSocketHandler.Name.Equals(gameRoomToRenew.MainUser))
+            {
+                BroadcastToGameRoom(serverSocketHandler, "GMAE_ROOM_WINNER_RESPONSE", gameRoomToRenew.SubUser);
+            }
+            else
+            {
+                BroadcastToGameRoom(serverSocketHandler, "GMAE_ROOM_WINNER_RESPONSE", gameRoomToRenew.MainUser);
+            }
+        }
+
+        private void ProcessMoveStoneResponse(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
+        {
+            GameMove gameMove = _gameRoomRepository.ConvertJsonToGameMove(message.Text);
+            OmokServerGameHandler omokHandler = _gameRoomRepository.GetGameHandlerByRoomName(gameMove.Text);
+            omokHandler.PlaceStone(gameMove.X, gameMove.Y);
+            string textToSend = _gameRoomRepository.ConvertGameMoveToJson(new GameMove {
+                Text = omokHandler.CurrentTurn == 1 ? "MAIN_USER" : "SUB_USER",
+                X = gameMove.X,
+                Y = gameMove.Y
+            });
+
+            BroadcastToGameRoom(serverSocketHandler, personalRequestType, textToSend);
+        }
+
+        private void BroadcastToGameRoom(ServerSocketHandler serverSocketHandler, string requestType, string textToSend)
+        {
+            foreach (ServerSocketHandler handler in _repositoryManager.GetServerSocketHanlders())
+            {
+                if (!handler.GetCurrentRoom().Equals(serverSocketHandler.GetCurrentRoom())) continue;
+                handler.Send(handler.CreateTheData(new Message
+                {
+                    Name = handler.Name,
+                    Destination = "GAME_ROOM",
+                    RequestType = requestType,
+                    Text = textToSend
+                }));
+            }
+        }
     }
 
     public class MainRobbyHandler : Handler
     {
         private RepositoryManager _repositoryManager;
+        private GameRoomRepository _gameRoomRepository;
+        private UserRepository _userRepository;
+
+        public MainRobbyHandler(RepositoryManager repositoryManager)
+        {
+            this._repositoryManager = repositoryManager;
+            _gameRoomRepository = _repositoryManager.GetGameRoomRepository();
+            _userRepository = _repositoryManager.GetUserRepository();
+        }
 
         public void HandleMessage(Message message, ServerSocketHandler serverSocketHandler)
         {
             // 전체 채팅, 메인 로비 퇴장, 특정 회원 정보 조회
+            if (message.RequestType.Equals("CHAT"))
+            {
+                ProcessChatResponse(message, serverSocketHandler, "CHAT_RESPONSE");
+                return;
+            }
+        }
+        private void ProcessChatResponse(Message message, ServerSocketHandler serverSocketHandler, string personalResponseType)
+        {
+            string textToSend = $"[{serverSocketHandler.Name}]: {message.Text}";
+
+            foreach (ServerSocketHandler handlerToChat in _repositoryManager.GetServerSocketHanlders())
+            {
+                if (serverSocketHandler.Name.Equals(handlerToChat.Name)) continue;
+                if (handlerToChat.GetCurrentRoom().Equals("MAIN_ROBBY"))
+                {
+                    handlerToChat.Send(handlerToChat.CreateTheData(new Message
+                    {
+                        Name = handlerToChat.Name,
+                        Destination = "MAIN_ROBBY",
+                        RequestType = personalResponseType,
+                        Text = textToSend
+                    }));
+                }
+            }
         }
     }
 
@@ -269,8 +428,9 @@ namespace Game_Server
         {
             User user = _userRepository.ConvertJsonToUser(message.Text);
             bool resultQuery = Login(user.ID, user.Password);
- 
-            if (resultQuery)
+            bool resultSearch = _userRepository.GetUser(user.ID) == null;
+
+            if (resultQuery && resultSearch)
             {
                 serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
                 {
@@ -286,9 +446,19 @@ namespace Game_Server
                     RequestType = personalRequestType,
                     Text = _gameRoomRepository.ConvertGameRoomListToJsonString()
                 }));
+
+                // 현재 유저 저장소에 유저 정보 등록
+                serverSocketHandler.Name = user.ID;
+                serverSocketHandler.SetCurrentRoom("MAIN_ROBBY");
+                _userRepository.AddUser(new User { ID = user.ID });
             } 
             else
             {
+                if (!resultSearch)
+                {
+                    ProcessDuplicateAccess(user.ID, serverSocketHandler, personalRequestType);
+                }
+
                 serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
                 {
                     RequestType = personalRequestType,
@@ -296,7 +466,18 @@ namespace Game_Server
                 }));
             }
         }
-        
+
+        private void ProcessDuplicateAccess(string userID, ServerSocketHandler serverSocketHandler, string personalRequestType)
+        {
+            // 메시지 수정 필요
+            serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
+            {
+                RequestType = personalRequestType,
+                Text = "NOT_FOUND_USER"
+            }));
+        }
+       
+
         private void ProcessSearchUserId(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
         {
             string phoneNumber = message.Text;
@@ -331,13 +512,13 @@ namespace Game_Server
             User userToSearch = _dbHandler.SearchByIdForPassword(userId) ;
             bool resultQuery = userToSearch != null;
 
-            if (userToSearch != null)
+            if (resultQuery)
             {
                 serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
                 {
                     Name = serverSocketHandler.Name,
                     Destination = "PASSWORD_FORM",
-                    RequestType = "SEARCH_RESPONSE",
+                    RequestType = personalRequestType,
                     Text = "CMPLETED"
                 }));
 
@@ -360,26 +541,6 @@ namespace Game_Server
             bool resultQuery = Register(userToRegist);
             SendResponse(serverSocketHandler, personalRequestType, resultQuery, serverSocketHandler.Name);
             if (resultQuery) { Logger.Instance.Log(Logger.LogLevel.Info, $"[{userToRegist.ID}] 회원 정보가 DB에 등록 되었습니다."); }
-
-/*            if (Register(userToRegist)) 
-            {
-                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
-                {
-                    Name = serverSocketHandler.Name,
-                    RequestType = "REGIST_RESPONSE",
-                    Text = "COMPLETED"
-                }));
-                Logger.Instance.Log(Logger.LogLevel.Info, userToRegist.ID + " 회원 정보가 DB에 등록 되었습니다.");
-            }
-            else
-            {
-                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
-                {
-                    Name = serverSocketHandler.Name,
-                    RequestType = personalRequestType,
-                    Text = "REFUSED"
-                }));
-            }*/
         }
 
         private void ProcessUnRegist(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
@@ -388,27 +549,6 @@ namespace Game_Server
             bool resultQuery = Unregister(userToUnRegist.ID, userToUnRegist.Password);
             SendResponse(serverSocketHandler, personalRequestType, resultQuery, serverSocketHandler.Name);
             if (resultQuery) { Logger.Instance.Log(Logger.LogLevel.Info, $"[{userToUnRegist.ID}] 회원 정보가 DB에서 제거 되었습니다."); }
-
-/*            if (Unregister(userToUnRegist.ID, userToUnRegist.Password)) 
-            {
-                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
-                {
-                    Name = serverSocketHandler.Name,
-                    RequestType = "UNREGIST_RESPONSE",
-                    Text = "COMPLETED"
-                }));
-
-                Logger.Instance.Log(Logger.LogLevel.Info, userToUnRegist.ID + " 회원 정보가 DB에서 제거 되었습니다.");
-            }
-            else
-            {
-                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
-                {
-                    Name = serverSocketHandler.Name,
-                    RequestType = personalRequestType,
-                    Text = "REFUSED"
-                }));
-            }*/
         }
 
         private void ProcessRenewUserPassword(Message message, ServerSocketHandler serverSocketHandler, string personalRequestType)
@@ -418,32 +558,8 @@ namespace Game_Server
             bool resultQuery = ResetPassword(userToRenewPassword.ID, userToReceived.Password);
             SendResponse(serverSocketHandler, personalRequestType, resultQuery, serverSocketHandler.Name);
             if (resultQuery) { _userRepository.RemoveUserBuffer(userToRenewPassword.ID); }
-
-/*
-            if (ResetPassword(userToRenewPassword.ID, userToReceived.Password))
-            {
-                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
-                {
-                    Name = serverSocketHandler.Name,
-                    RequestType = personalRequestType,
-                    Text = "COMPLETED"
-                }));
-
-                _userRepository.RemoveUserBuffer(userToRenewPassword.ID);
-                Logger.Instance.Log(Logger.LogLevel.Info, userToRenewPassword.ID + " 의 비밀번호 변경이 완료 되었습니다.");
-            }
-            else
-            {
-                serverSocketHandler.Send(serverSocketHandler.CreateTheData(new Message
-                {
-                    Name = serverSocketHandler.Name,
-                    RequestType = personalRequestType,
-                    Text = "REFUSED"
-                }));
-            }*/
         }
 
-        // 함수 추가 
         private void SendResponse(ServerSocketHandler serverSocketHandler, string personalRequestType, bool queryResult, string userName)
         {
             string responseText = queryResult ? "COMPLETED" : "REFUSED";
@@ -535,14 +651,14 @@ namespace Game_Server
 
         public Dictionary<string, Handler> initializeProcessHandlers()
         {
-            // 로그인 메시지를 받았을 때 DB와 비교 후 User 목록 추가
             Dictionary<string, Handler>  processhandlers = new Dictionary<string, Handler>
             {
                 // 리퀘스트 타입으로 구분 -> 추후에 목적지로 수정  
                 { "DISCONNECT", new ConnectionHandler(_repositoryManager) },
                 // 목적지로 구분 
                 { "GAME_ROOM", new GameRoomHandler(_repositoryManager) },
-                { "DATABASE", new LoginHandler(_repositoryManager) }
+                { "DATABASE", new LoginHandler(_repositoryManager) },
+                { "MAIN_ROBBY", new MainRobbyHandler(_repositoryManager) }
             };
 
             return processhandlers;
@@ -586,7 +702,7 @@ namespace Game_Server
                 }
                 
                 Message message = DequeueFromMessages();
-                _logger.Log(Logger.LogLevel.Info, message.RequestType); 
+                _logger.Log(Logger.LogLevel.Info, $"[메시지 타입] : {message.RequestType}"); 
                 if (_repositoryManager.GetServerSocketHandlerCount() < 0) continue;
 
                 ServerSocketHandler handlerToParse = _repositoryManager.SearchServerSocketHandler(message.Name);
@@ -610,22 +726,16 @@ namespace Game_Server
                 if (message.Destination.Equals("GAME_ROOM"))
                 {
                     Handler handler = _processhandlers[message.Destination];
-                    handler.HandleMessage(message, handlerToParse);         
+                    handler.HandleMessage(message, handlerToParse);
+                    continue;
                 }
 
-                if (message.RequestType.Equals("CHAT"))
-                {
-                    _logger.Log(Logger.LogLevel.Info, handlerToParse.Name + message.Text);
-                    if (message.Destination.Equals("MAIN_ROBBY"))
-                    {
-                        string textToSend = "[" + handlerToParse.Name + "] : " + message.Text;
 
-                        _repositoryManager.BroadCastToServerSocketHandlers(new Message
-                        {
-                            RequestType = "CHAT_RESPONSE",
-                            Text = textToSend
-                        });
-                    }
+                if (message.Destination.Equals("MAIN_ROBBY"))
+                {
+                    Handler handler = _processhandlers[message.Destination];
+                    handler.HandleMessage(message, handlerToParse);
+                    continue;
                 }
             }
         }
