@@ -46,3 +46,4 @@ C# 과목 과제용 프로젝트
 
 2024/05/24
 - 오목 승리 검사 구현
+- 클라이언트 코드 https://github.com/changsei/OmokGameUI
