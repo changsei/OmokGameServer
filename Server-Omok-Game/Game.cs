@@ -45,11 +45,6 @@ namespace Server_Omok_Game
             CurrentTurn = CurrentTurn == 1 ? 2 : 1;
         }
 
-        /*        public bool CheckForWin(int x, int y)
-                {
-                    return false;
-                }*/
-
         public bool CheckForWin(int x, int y)
         {
             STONE currentStone = Board[x, y];
@@ -88,7 +83,6 @@ namespace Server_Omok_Game
                         break; // 연속된 돌이 끊기면 중단
                 }
 
-                // 5개 이상의 돌이 연속되면 승리
                 if (count >= 5) return true;
             }
 

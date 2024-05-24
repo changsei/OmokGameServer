@@ -295,15 +295,37 @@ namespace Game_Server
         {
             GameMove gameMove = _gameRoomRepository.ConvertJsonToGameMove(message.Text);
             OmokServerGameHandler omokHandler = _gameRoomRepository.GetGameHandlerByRoomName(gameMove.Text);
-            Logger.Instance.Log(Logger.LogLevel.Info, $"[게임 결과]: {omokHandler.PlaceStone(gameMove.X, gameMove.Y)}");
+            bool gameResult = omokHandler.PlaceStone(gameMove.X, gameMove.Y);
+
+            // 돌 정보 갱신 
             string textToSend = _gameRoomRepository.ConvertGameMoveToJson(new GameMove
             {
                 Text = omokHandler.CurrentTurn == 1 ? "MAIN_USER" : "SUB_USER",
                 X = gameMove.X,
                 Y = gameMove.Y
             });
-
             BroadcastToGameRoom(serverSocketHandler, personalRequestType, textToSend);
+
+            Logger.Instance.Log(Logger.LogLevel.Info, $"[게임 결과]: {gameResult}");
+            if (gameResult)
+            {
+                // 현재 게임룸 추정, 상태 업데이트 
+                GameRoom gameRoomToRenew = _gameRoomRepository.GetRoom(gameMove.Text);
+                gameRoomToRenew.SubUserReady = false;
+                gameRoomToRenew.MainUserReady = false;
+                string text = _gameRoomRepository.ConvertGameRoomToJson(gameRoomToRenew);
+                this.BroadcastToGameRoom(serverSocketHandler, "SURRENDER_RESPONSE", text);
+                
+                // 승자 메시지 발송
+                if (omokHandler.CurrentTurn == 1) // 1 = MainUser
+                {
+                    BroadcastToGameRoom(serverSocketHandler, "GMAE_ROOM_WINNER_RESPONSE", gameRoomToRenew.MainUser);
+                }
+                else
+                {
+                    BroadcastToGameRoom(serverSocketHandler, "GMAE_ROOM_WINNER_RESPONSE", gameRoomToRenew.SubUser);
+                }
+            }
         }
 
         private void BroadcastToGameRoom(ServerSocketHandler serverSocketHandler, string requestType, string textToSend)
